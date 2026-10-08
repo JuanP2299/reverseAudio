@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reversed Audio</title>
+<style>
+:root{--bg:#f2efe9;--fg:#1d2a33;--mut:#5d6b74;--card:#fff;--ac:#2b6f77;--rec:#c0392b;--ln:#d6d2c9;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14191d;--fg:#e8eceb;--mut:#92a0a6;--card:#1d252a;--ac:#5fb8c1;--rec:#e66a5c;--ln:#2c373d}}
+:root[data-theme="dark"]{--bg:#14191d;--fg:#e8eceb;--mut:#92a0a6;--card:#1d252a;--ac:#5fb8c1;--rec:#e66a5c;--ln:#2c373d}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 Georgia,"Times New Roman",serif;min-height:100vh;display:flex;justify-content:center}
+main{width:100%;max-width:520px;padding:28px 20px}
+h1{font-size:2rem;margin:0 0 4px;letter-spacing:-.01em}
+p.sub{margin:0 0 24px;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:18px}
+canvas{width:100%;height:110px;display:block;border-bottom:1px solid var(--ln);margin-bottom:14px}
+#status{font-family:system-ui,sans-serif;font-size:.9rem;color:var(--mut);min-height:1.4em;margin:0 0 14px}
+.row{display:flex;flex-wrap:wrap;gap:10px}
+button{font:600 .95rem system-ui,sans-serif;padding:12px 16px;border-radius:10px;border:1px solid var(--ln);background:transparent;color:var(--fg);cursor:pointer;flex:1 1 140px}
+button.main{background:var(--ac);border-color:var(--ac);color:#fff}
+button.rec{background:var(--rec);border-color:var(--rec);color:#fff}
+button:disabled{opacity:.4;cursor:not-allowed}
+.perm{font-family:system-ui,sans-serif;font-size:.9rem;border:1px solid var(--ln);border-radius:10px;padding:12px;margin:0 0 14px}
+.perm p{margin:0 0 10px}
+.perm.denied{border-color:var(--rec)}
+.perm a{color:var(--ac)}
+[hidden]{display:none!important}
+.hist{margin-top:22px}
+.hist .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.hist h2{font-size:1.15rem;margin:0}
+.hist .clear{flex:none;border:none;padding:4px 6px;font-size:.8rem;color:var(--mut);text-decoration:underline}
+.hist ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.hist li{background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:12px}
+.hist .meta{font:.85rem system-ui,sans-serif;color:var(--mut);margin-bottom:8px}
+.hist li button{padding:8px 10px;font-size:.85rem;flex:1 1 90px}
+.hist .empty{color:var(--mut);font:.9rem system-ui,sans-serif}
+button:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Reversed Audio</h1>
+  <p class="sub">Record your voice, play it backwards and save the result.</p>
+  <div class="card">
+    <canvas id="wave" width="460" height="110"></canvas>
+    <p id="status" role="status">Press “Record” to start.</p>
+    <div id="perm" class="perm" hidden>
+      <p id="permMsg"></p>
+      <div class="row">
+        <button id="permBtn" class="main">Allow microphone</button>
+        <button id="tabBtn" hidden>Open in new tab</button>
+      </div>
+    </div>
+    <div class="row">
+      <button id="rec" class="rec">Record</button>
+      <button id="play" class="main" disabled>Play reversed</button>
+      <button id="orig" disabled>Play original</button>
+      <button id="save" disabled>Save reversed (WAV)</button>
+    </div>
+  </div>
+  <section class="hist" aria-label="History">
+    <div class="top"><h2>Last recordings</h2><button id="clear" class="clear" hidden>Clear history</button></div>
+    <ul id="histList"></ul>
+  </section>
+</main>
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var recBtn=$('rec'),playBtn=$('play'),origBtn=$('orig'),saveBtn=$('save'),statusEl=$('status'),cv=$('wave');
+  var ctx=null,mediaRec=null,chunks=[],stream=null,original=null,reversed=null,src=null;
+
+  function setStatus(t){statusEl.textContent=t}
+  function getCtx(){ if(!ctx){ctx=new (window.AudioContext||window.webkitAudioContext)()} if(ctx.state==='suspended')ctx.resume(); return ctx }
+
+  function drawWave(buf){
+    var g=cv.getContext('2d'),w=cv.width,h=cv.height;
+    g.clearRect(0,0,w,h);
+    if(!buf)return;
+    var d=buf.getChannelData(0),step=Math.max(1,Math.floor(d.length/w));
+    g.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--ac').trim()||'#2b6f77';
+    for(var x=0;x<w;x++){
+      var mx=0;
+      for(var j=0;j<step;j++){var v=Math.abs(d[x*step+j]||0); if(v>mx)mx=v}
+      var bh=Math.max(1,mx*h*0.95);
+      g.fillRect(x,(h-bh)/2,1,bh);
+    }
+  }
+
+  function reverseBuffer(buf){
+    var out=getCtx().createBuffer(buf.numberOfChannels,buf.length,buf.sampleRate);
+    for(var c=0;c<buf.numberOfChannels;c++){
+      var a=buf.getChannelData(c).slice();
+      a.reverse();
+      out.copyToChannel(a,c);
+    }
+    return out;
+  }
+
+  function stopPlayback(){
+    if(src){try{src.onended=null;src.stop()}catch(e){} src=null}
+    playBtn.textContent='Play reversed';
+    origBtn.textContent='Play original';
+    document.querySelectorAll('#histList [data-label]').forEach(function(b){b.textContent=b.getAttribute('data-label')});
+  }
+
+  function playBuffer(buf,btn,label){
+    stopPlayback();
+    var c=getCtx();
+    src=c.createBufferSource();
+    src.buffer=buf;
+    src._btn=btn;
+    src.connect(c.destination);
+    src.onended=function(){stopPlayback();setStatus('Playback finished.')};
+    src.start();
+    btn.textContent='Stop';
+    setStatus(label);
+  }
+
+  function toWav(buf){
+    var ch=buf.numberOfChannels,len=buf.length,sr=buf.sampleRate;
+    var ab=new ArrayBuffer(44+len*ch*2),v=new DataView(ab);
+    function s(o,t){for(var i=0;i<t.length;i++)v.setUint8(o+i,t.charCodeAt(i))}
+    s(0,'RIFF');v.setUint32(4,36+len*ch*2,true);s(8,'WAVE');s(12,'fmt ');
+    v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,ch,true);
+    v.setUint32(24,sr,true);v.setUint32(28,sr*ch*2,true);v.setUint16(32,ch*2,true);v.setUint16(34,16,true);
+    s(36,'data');v.setUint32(40,len*ch*2,true);
+    var chans=[];for(var c=0;c<ch;c++)chans.push(buf.getChannelData(c));
+    var o=44;
+    for(var i=0;i<len;i++){
+      for(var k=0;k<ch;k++){
+        var x=Math.max(-1,Math.min(1,chans[k][i]));
+        v.setInt16(o,x<0?x*0x8000:x*0x7FFF,true);o+=2;
+      }
+    }
+    return new Blob([ab],{type:'audio/wav'});
+  }
+
+  var permBox=$('perm'),permMsg=$('permMsg'),permBtn=$('permBtn'),tabBtn=$('tabBtn');
+  var inFrame=false;try{inFrame=window.self!==window.top}catch(e){inFrame=true}
+
+  function showPerm(kind){
+    permBox.hidden=false;
+    permBox.classList.toggle('denied',kind!=='prompt');
+    permBtn.hidden=false;tabBtn.hidden=true;
+    if(kind==='prompt'){
+      permMsg.textContent='I need access to your microphone to record. Press the button and accept the browser prompt.';
+    }else if(kind==='denied'){
+      permMsg.textContent='Microphone permission is blocked. Enable it from the lock icon next to the address bar (Site permissions), reload the page and try again.';
+      permBtn.textContent='Try again';
+      if(inFrame)tabBtn.hidden=false;
+    }else if(kind==='frame'){
+      permMsg.textContent='This embedded view does not allow microphone use. Open it in its own tab to record.';
+      permBtn.hidden=true;tabBtn.hidden=false;
+    }else if(kind==='nomic'){
+      permMsg.textContent='No microphone found. Connect one and press Try again.';
+      permBtn.textContent='Try again';
+    }else{
+      permMsg.textContent='This browser cannot record audio here (a secure https connection is required).';
+      permBtn.hidden=true;
+    }
+  }
+
+  async function ensureMic(){
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){showPerm('unsupported');return null}
+    if(stream&&stream.getTracks().length&&stream.getTracks().every(function(t){return t.readyState==='live'})){
+      permBox.hidden=true;
+      return stream;
+    }
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      permBox.hidden=true;
+      return stream;
+    }catch(e){
+      if(e.name==='NotFoundError'||e.name==='OverconstrainedError')showPerm('nomic');
+      else if(inFrame&&(e.name==='SecurityError'||e.name==='NotAllowedError'))showPerm('frame');
+      else showPerm('denied');
+      setStatus('Could not access the microphone.');
+      return null;
+    }
+  }
+
+  async function checkPerm(){
+    if(!navigator.mediaDevices){showPerm('unsupported');return}
+    try{
+      var r=await navigator.permissions.query({name:'microphone'});
+      var apply=function(){
+        if(r.state==='granted')permBox.hidden=true;
+        else if(r.state==='denied')showPerm(inFrame?'frame':'denied');
+        else showPerm('prompt');
+      };
+      r.onchange=apply;apply();
+    }catch(e){ /* browser cannot query the permission: it will be requested when recording */ }
+  }
+
+  permBtn.onclick=async function(){
+    var s=await ensureMic();
+    if(s)setStatus('Microphone ready. Press “Record”.');
+  };
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden&&stream&&!(mediaRec&&mediaRec.state==='recording')){
+      stream.getTracks().forEach(function(t){t.stop()});
+      stream=null;
+    }
+  });
+  tabBtn.onclick=function(){window.open(location.href,'_blank','noopener')};
+  checkPerm();
+
+  /* ---------- History (last 5) ---------- */
+  var MAX=5,history=[],cache={},histList=$('histList'),clearBtn=$('clear');
+
+  function openDB(){
+    return new Promise(function(res,rej){
+      var r=indexedDB.open('audio-al-reves',1);
+      r.onupgradeneeded=function(){r.result.createObjectStore('kv')};
+      r.onsuccess=function(){res(r.result)};
+      r.onerror=function(){rej(r.error)};
+    });
+  }
+  async function loadHist(){
+    try{
+      var db=await openDB();
+      return await new Promise(function(res){
+        var q=db.transaction('kv').objectStore('kv').get('history');
+        q.onsuccess=function(){res(q.result||[])};
+        q.onerror=function(){res([])};
+      });
+    }catch(e){return []}
+  }
+  async function saveHist(){
+    try{
+      var db=await openDB();
+      db.transaction('kv','readwrite').objectStore('kv').put(history,'history');
+    }catch(e){ /* no storage available: history lasts only while the page is open */ }
+  }
+
+  async function getBufs(item){
+    if(cache[item.id])return cache[item.id];
+    var o=await getCtx().decodeAudioData(await item.blob.arrayBuffer());
+    cache[item.id]={orig:o,rev:reverseBuffer(o)};
+    return cache[item.id];
+  }
+
+  function addHistory(blob,orig,rev){
+    var id=Date.now()+'-'+Math.random().toString(36).slice(2,6);
+    history.push({id:id,blob:blob,ts:Date.now(),dur:orig.duration});
+    cache[id]={orig:orig,rev:rev};
+    while(history.length>MAX){var old=history.shift();delete cache[old.id]}
+    renderHist();
+    saveHist();
+  }
+
+  function mkBtn(label,fn){
+    var b=document.createElement('button');
+    b.textContent=label;b.setAttribute('data-label',label);
+    b.onclick=function(){fn(b)};
+    return b;
+  }
+
+  function renderHist(){
+    histList.innerHTML='';
+    clearBtn.hidden=!history.length;
+    if(!history.length){
+      var e=document.createElement('li');e.className='empty';
+      e.textContent='Your last 5 recordings will appear here.';
+      histList.appendChild(e);return;
+    }
+    history.slice().reverse().forEach(function(item){
+      var li=document.createElement('li');
+      var meta=document.createElement('div');meta.className='meta';
+      meta.textContent=new Date(item.ts).toLocaleString('en',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})+' · '+item.dur.toFixed(1)+' s';
+      var row=document.createElement('div');row.className='row';
+      function play(which,label){
+        return function(btn){
+          if(src&&src._btn===btn){stopPlayback();setStatus('Stopped.');return}
+          getBufs(item).then(function(b){
+            drawWave(b[which]);
+            playBuffer(b[which],btn,label);
+          }).catch(function(){setStatus('Could not play this audio.')});
+        };
+      }
+      row.appendChild(mkBtn('Original',play('orig','Playing original…')));
+      row.appendChild(mkBtn('Reversed',play('rev','Playing reversed…')));
+      row.appendChild(mkBtn('Save',function(){
+        getBufs(item).then(function(b){
+          var url=URL.createObjectURL(toWav(b.rev));
+          var a=document.createElement('a');
+          a.href=url;a.download='reversed-audio-'+item.ts+'.wav';
+          document.body.appendChild(a);a.click();a.remove();
+          setTimeout(function(){URL.revokeObjectURL(url)},2000);
+        });
+      }));
+      li.appendChild(meta);li.appendChild(row);
+      histList.appendChild(li);
+    });
+  }
+
+  clearBtn.onclick=function(){
+    stopPlayback();
+    history=[];cache={};
+    renderHist();saveHist();
+  };
+
+  renderHist();
+  loadHist().then(function(h){
+    if(!history.length){history=h.slice(-MAX);renderHist()}
+  });
+
+  async function startRec(){
+    stopPlayback();
+    if(!(await ensureMic()))return;
+    chunks=[];
+    mediaRec=new MediaRecorder(stream);
+    mediaRec.ondataavailable=function(e){if(e.data.size)chunks.push(e.data)};
+    mediaRec.onstop=async function(){
+      setStatus('Processing…');
+      try{
+        var ab=await new Blob(chunks).arrayBuffer();
+        original=await getCtx().decodeAudioData(ab);
+        reversed=reverseBuffer(original);
+        addHistory(new Blob(chunks,{type:mediaRec.mimeType||'audio/webm'}),original,reversed);
+        drawWave(reversed);
+        playBtn.disabled=origBtn.disabled=saveBtn.disabled=false;
+        setStatus('Done: '+original.duration.toFixed(1)+' s recorded.');
+      }catch(e){
+        setStatus('Could not process the recording. Please try again.');
+      }
+    };
+    mediaRec.start();
+    recBtn.textContent='Stop recording';
+    playBtn.disabled=origBtn.disabled=saveBtn.disabled=true;
+    setStatus('Recording…');
+  }
+
+  recBtn.onclick=function(){
+    if(mediaRec&&mediaRec.state==='recording'){
+      mediaRec.stop();
+      recBtn.textContent='Record again';
+    }else{
+      startRec();
+    }
+  };
+  playBtn.onclick=function(){
+    if(src){stopPlayback();setStatus('Stopped.');return}
+    playBuffer(reversed,playBtn,'Playing reversed…');
+  };
+  origBtn.onclick=function(){
+    if(src){stopPlayback();setStatus('Stopped.');return}
+    playBuffer(original,origBtn,'Playing original…');
+  };
+  saveBtn.onclick=function(){
+    var url=URL.createObjectURL(toWav(reversed));
+    var a=document.createElement('a');
+    a.href=url;a.download='reversed-audio.wav';
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(function(){URL.revokeObjectURL(url)},2000);
+    setStatus('File reversed-audio.wav generated.');
+  };
+})();
+</script>
+</body>
+</html>
